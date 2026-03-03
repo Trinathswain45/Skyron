@@ -1,0 +1,91 @@
+﻿services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-skyron}
+      POSTGRES_USER: ${POSTGRES_USER:-skyron}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-skyron}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-skyron} -d ${POSTGRES_DB:-skyron}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.1
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+  backend:
+    image: skyron/backend:${SKYRON_VERSION:-0.1.0}
+    build:
+      context: ./backend
+      args:
+        APP_VERSION: ${SKYRON_VERSION:-0.1.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    image: skyron/worker:${SKYRON_VERSION:-0.1.0}
+    build:
+      context: ./worker
+      args:
+        APP_VERSION: ${SKYRON_VERSION:-0.1.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+    env_file:
+      - .env
+
+  frontend:
+    image: skyron/frontend:${SKYRON_VERSION:-0.1.0}
+    build:
+      context: ./frontend
+      args:
+        APP_VERSION: ${SKYRON_VERSION:-0.1.0}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "5173:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:

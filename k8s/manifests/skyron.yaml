@@ -1,0 +1,112 @@
+﻿apiVersion: v1
+kind: Namespace
+metadata:
+  name: skyron
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: skyron-config
+  namespace: skyron
+data:
+  DATABASE_URL: "postgresql://skyron:skyron@host.minikube.internal:5432/skyron"
+  KAFKA_BOOTSTRAP_SERVERS: "host.minikube.internal:9092"
+  KAFKA_TASKS_TOPIC: "skyron.tasks"
+  KAFKA_RETRY_TOPIC: "skyron.tasks.retry"
+  KAFKA_DLQ_TOPIC: "skyron.tasks.dlq"
+  MAX_RETRIES: "3"
+  RETRY_BASE_SECONDS: "2"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skyron-backend
+  namespace: skyron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skyron-backend
+  template:
+    metadata:
+      labels:
+        app: skyron-backend
+    spec:
+      containers:
+      - name: backend
+        image: skyron-backend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: skyron-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skyron-backend
+  namespace: skyron
+spec:
+  selector:
+    app: skyron-backend
+  ports:
+  - port: 8000
+    targetPort: 8000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skyron-worker
+  namespace: skyron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skyron-worker
+  template:
+    metadata:
+      labels:
+        app: skyron-worker
+    spec:
+      containers:
+      - name: worker
+        image: skyron-worker:latest
+        imagePullPolicy: IfNotPresent
+        envFrom:
+        - configMapRef:
+            name: skyron-config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: skyron-frontend
+  namespace: skyron
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: skyron-frontend
+  template:
+    metadata:
+      labels:
+        app: skyron-frontend
+    spec:
+      containers:
+      - name: frontend
+        image: skyron-frontend:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 5173
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: skyron-frontend
+  namespace: skyron
+spec:
+  selector:
+    app: skyron-frontend
+  ports:
+  - port: 5173
+    targetPort: 5173
