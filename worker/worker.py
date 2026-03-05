@@ -3,8 +3,8 @@ import os
 import time
 import enum
 from datetime import datetime
+from typing import Any
 
-from kafka import KafkaConsumer, KafkaProducer
 from sqlalchemy import DateTime, Enum, Integer, Text, create_engine
 from sqlalchemy.orm import Mapped, Session, declarative_base, mapped_column
 
@@ -53,12 +53,14 @@ def process(payload: str) -> str:
     return payload.upper()
 
 
-def publish(producer: KafkaProducer, topic: str, data: dict) -> None:
+def publish(producer: Any, topic: str, data: dict) -> None:
     producer.send(topic, data)
     producer.flush()
 
 
 def main():
+    from kafka import KafkaConsumer, KafkaProducer
+
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 
     consumer = KafkaConsumer(
