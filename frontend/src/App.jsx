@@ -1,4 +1,4 @@
-﻿import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const FEATURES = [
   {
@@ -26,10 +26,18 @@ const SAVED_DESIGNS = ["Kafka Retry Pattern", "Zero-Downtime Rollout", "RDS Mult
 
 const DEFAULT_OUTPUT = {
   architecture: `graph TD\n  UI[React Frontend] --> API[FastAPI Gateway]\n  API --> KAFKA[(Kafka Topics)]\n  KAFKA --> WORKER[Task Worker Pool]\n  WORKER --> DB[(PostgreSQL)]\n  WORKER --> OBJ[(S3 Storage)]\n  API --> MON[Prometheus + Grafana]`,
-  stack: ["Frontend: Next.js + TypeScript", "API: FastAPI", "Queue: Kafka", "Database: PostgreSQL", "Orchestration: Kubernetes (EKS)"],
-  database: `users(id, email, role, created_at)\ntasks(id, user_id, priority, status, input_ref, output_ref, created_at)\njob_events(id, task_id, event_type, message, created_at)`,
-  api: `POST   /api/v1/tasks\nGET    /api/v1/tasks/{id}\nGET    /api/v1/tasks/{id}/events\nPOST   /api/v1/tasks/{id}/cancel\nGET    /api/v1/metrics`,
-  deployment: "Deploy on EKS with HPA for API/worker pods, RDS PostgreSQL in private subnets, ALB ingress with TLS, and CI image promotion by environment.",
+  stack: ["Frontend: React", "API: FastAPI", "Queue: Kafka", "Database: PostgreSQL", "Orchestration: Kubernetes"],
+  database: `tasks(id, payload, status, result, created_at, updated_at)\ndlq_records(id, task_id, payload, attempt, error, created_at)`,
+  api: `POST   /tasks\nGET    /tasks/{id}\nGET    /dlq\nGET    /dlq/{task_id}\nWS     /ws/tasks/{id}`,
+  deployment: "Submit a task to the API, process it asynchronously in workers, and watch status updates in real time.",
+};
+
+const DEFAULT_API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
+
+const toWsBaseUrl = (httpBaseUrl) => {
+  if (httpBaseUrl.startsWith("https://")) return httpBaseUrl.replace(/^https:\/\//, "wss://");
+  if (httpBaseUrl.startsWith("http://")) return httpBaseUrl.replace(/^http:\/\//, "ws://");
+  return httpBaseUrl;
 };
 
 function Toasts({ items, onClose }) {
@@ -67,16 +75,26 @@ export default function App() {
   const [projectName, setProjectName] = useState("Skyron Production Architecture");
   const [prompt, setPrompt] = useState("");
   const [files, setFiles] = useState([]);
+  const [apiBaseUrl, setApiBaseUrl] = useState(DEFAULT_API_BASE_URL);
+
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isLoadingDlq, setIsLoadingDlq] = useState(false);
   const [activeTab, setActiveTab] = useState("architecture");
   const [output, setOutput] = useState(DEFAULT_OUTPUT);
   const [versions, setVersions] = useState(["v1 - Initial Draft"]);
   const [toasts, setToasts] = useState([]);
   const [shareOpen, setShareOpen] = useState(false);
 
+  const [currentTaskId, setCurrentTaskId] = useState(null);
+  const [currentTaskStatus, setCurrentTaskStatus] = useState("IDLE");
+  const [dlqRecords, setDlqRecords] = useState([]);
+  const [wsConnected, setWsConnected] = useState(false);
+
+  const wsRef = useRef(null);
+  const pollTimerRef = useRef(null);
+
   const charCount = prompt.length;
   const maxChars = 2000;
-
   const canGenerate = prompt.trim().length > 0 && !isGenerating;
 
   const shareLink = useMemo(() => {
@@ -102,22 +120,152 @@ export default function App() {
     }
   };
 
+  const stopRealtimeTracking = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    setWsConnected(false);
+  };
+
+  const refreshDlq = async () => {
+    setIsLoadingDlq(true);
+    try {
+      const response = await fetch(`${apiBaseUrl}/dlq?limit=20`);
+      if (!response.ok) {
+        throw new Error(`DLQ request failed (${response.status})`);
+      }
+      const records = await response.json();
+      setDlqRecords(records);
+    } catch (error) {
+      pushToast(error.message || "Failed to load DLQ", "error");
+    } finally {
+      setIsLoadingDlq(false);
+    }
+  };
+
+  const handleTerminalTaskState = (task) => {
+    if (task.status === "COMPLETED") {
+      const resultText = task.result || "Task completed";
+      setOutput((prev) => ({
+        ...prev,
+        architecture: resultText,
+        deployment: `Task #${task.id} completed successfully for "${projectName}".`,
+      }));
+      setIsGenerating(false);
+      setVersions((prev) => [`v${prev.length + 1} - Task #${task.id} completed`, ...prev]);
+      pushToast(`Task #${task.id} completed`, "success");
+      stopRealtimeTracking();
+      return;
+    }
+
+    if (task.status === "FAILED") {
+      setOutput((prev) => ({
+        ...prev,
+        deployment: `Task #${task.id} failed: ${task.result || "Unknown error"}`,
+      }));
+      setIsGenerating(false);
+      setVersions((prev) => [`v${prev.length + 1} - Task #${task.id} failed`, ...prev]);
+      pushToast(`Task #${task.id} failed`, "error");
+      stopRealtimeTracking();
+      refreshDlq();
+    }
+  };
+
+  const onTaskSnapshot = (task) => {
+    if (!task) return;
+    setCurrentTaskStatus(task.status || "UNKNOWN");
+    if (task.status === "COMPLETED" || task.status === "FAILED") {
+      handleTerminalTaskState(task);
+    }
+  };
+
+  const startPolling = (taskId) => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    pollTimerRef.current = setInterval(async () => {
+      try {
+        const response = await fetch(`${apiBaseUrl}/tasks/${taskId}`);
+        if (!response.ok) return;
+        const task = await response.json();
+        onTaskSnapshot(task);
+      } catch {
+        // No-op: keep trying while task is running.
+      }
+    }, 1500);
+  };
+
+  const trackTaskRealtime = (taskId) => {
+    stopRealtimeTracking();
+    const wsUrl = `${toWsBaseUrl(apiBaseUrl)}/ws/tasks/${taskId}`;
+
+    try {
+      const socket = new WebSocket(wsUrl);
+      wsRef.current = socket;
+
+      socket.onopen = () => {
+        setWsConnected(true);
+      };
+
+      socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          onTaskSnapshot(data);
+        } catch {
+          pushToast("Received invalid status event", "error");
+        }
+      };
+
+      socket.onerror = () => {
+        setWsConnected(false);
+        if (isGenerating) startPolling(taskId);
+      };
+
+      socket.onclose = () => {
+        setWsConnected(false);
+        if (isGenerating) startPolling(taskId);
+      };
+    } catch {
+      startPolling(taskId);
+    }
+  };
+
   const onGenerate = async () => {
     if (!canGenerate) return;
     setIsGenerating(true);
-    pushToast("Generating architecture...", "info");
+    setCurrentTaskStatus("PENDING");
+    pushToast("Submitting task...", "info");
 
-    setTimeout(() => {
-      const next = versions.length + 1;
-      setVersions((prev) => [`v${next} - Refined ${new Date().toLocaleTimeString()}`, ...prev]);
-      setOutput({
-        ...DEFAULT_OUTPUT,
-        deployment: `Generated for project "${projectName}" with ${files.length} attachment(s). ${DEFAULT_OUTPUT.deployment}`,
+    try {
+      const response = await fetch(`${apiBaseUrl}/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ payload: prompt }),
       });
+
+      if (!response.ok) {
+        throw new Error(`Task submission failed (${response.status})`);
+      }
+
+      const task = await response.json();
+      setCurrentTaskId(task.id);
+      setCurrentTaskStatus(task.status || "PENDING");
+      setOutput((prev) => ({
+        ...prev,
+        deployment: `Task #${task.id} submitted for "${projectName}" with ${files.length} attachment(s).`,
+      }));
+      setVersions((prev) => [`v${prev.length + 1} - Task #${task.id} submitted`, ...prev]);
       setActiveTab("architecture");
+      pushToast(`Task #${task.id} created`, "success");
+      trackTaskRealtime(task.id);
+    } catch (error) {
       setIsGenerating(false);
-      pushToast("Architecture generated", "success");
-    }, 1400);
+      setCurrentTaskStatus("FAILED");
+      pushToast(error.message || "Failed to submit task", "error");
+    }
   };
 
   const onNewProject = () => {
@@ -127,6 +275,9 @@ export default function App() {
     setVersions(["v1 - Initial Draft"]);
     setOutput(DEFAULT_OUTPUT);
     setActiveTab("architecture");
+    setCurrentTaskId(null);
+    setCurrentTaskStatus("IDLE");
+    stopRealtimeTracking();
     pushToast("New project started", "info");
   };
 
@@ -139,8 +290,16 @@ export default function App() {
     pushToast("Export started (mock)", "info");
   };
 
+  useEffect(() => {
+    refreshDlq();
+  }, []);
+
+  useEffect(() => {
+    return () => stopRealtimeTracking();
+  }, []);
+
   const tabContent = {
-    architecture: <CopyBlock label="Architecture Diagram (Mermaid)" content={output.architecture} onCopy={copyText} />,
+    architecture: <CopyBlock label="Task Output" content={output.architecture} onCopy={copyText} />,
     stack: (
       <div className="panel-card">
         <h3>Tech Stack Suggestions</h3>
@@ -256,6 +415,11 @@ export default function App() {
               </label>
 
               <label>
+                Backend API URL
+                <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value.replace(/\/+$/, ""))} />
+              </label>
+
+              <label>
                 Architecture Prompt
                 <textarea
                   value={prompt}
@@ -286,7 +450,15 @@ export default function App() {
                 </button>
                 <button className="ghost-btn" onClick={onGenerate}>Regenerate</button>
                 <button className="ghost-btn" onClick={downloadPdf}>Download PDF</button>
+                <button className="ghost-btn" onClick={refreshDlq} disabled={isLoadingDlq}>
+                  {isLoadingDlq ? "Refreshing DLQ..." : "Refresh DLQ"}
+                </button>
               </div>
+
+              <p>
+                Task: {currentTaskId ? `#${currentTaskId}` : "N/A"} | Status: {currentTaskStatus}
+                {" "} | Transport: {wsConnected ? "WebSocket" : "Polling/Idle"}
+              </p>
             </div>
 
             <div className="panel-card">
@@ -326,6 +498,21 @@ export default function App() {
                   <li key={version}>{version}</li>
                 ))}
               </ul>
+            </div>
+
+            <div className="panel-card">
+              <h3>Dead Letter Queue</h3>
+              {dlqRecords.length === 0 ? (
+                <p>No DLQ records.</p>
+              ) : (
+                <ul className="clean-list">
+                  {dlqRecords.map((record) => (
+                    <li key={record.id}>
+                      #{record.task_id} | attempt {record.attempt} | {record.error}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           </section>
         </main>
