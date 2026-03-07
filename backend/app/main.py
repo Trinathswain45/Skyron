@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from .db import Base, SessionLocal, engine, get_db
 from .kafka_client import TaskProducer
 from .models import DlqRecord, Task, TaskStatus
-from .schemas import DlqRecordResponse, TaskCreate, TaskResponse
+from .schemas import DlqRecordResponse, TaskCreate, TaskResponse, TaskStatsResponse
 
 producer = None
 
@@ -74,6 +74,17 @@ def list_dlq(limit: int = 50, db: Session = Depends(get_db)):
 def get_dlq_by_task(task_id: int, db: Session = Depends(get_db)):
     rows = db.query(DlqRecord).filter(DlqRecord.task_id == task_id).order_by(DlqRecord.created_at.desc()).all()
     return rows
+
+
+@app.get("/stats", response_model=TaskStatsResponse)
+def get_task_stats(db: Session = Depends(get_db)):
+    return {
+        "total": db.query(Task).count(),
+        "pending": db.query(Task).filter(Task.status == TaskStatus.PENDING).count(),
+        "processing": db.query(Task).filter(Task.status == TaskStatus.PROCESSING).count(),
+        "completed": db.query(Task).filter(Task.status == TaskStatus.COMPLETED).count(),
+        "failed": db.query(Task).filter(Task.status == TaskStatus.FAILED).count(),
+    }
 
 
 @app.websocket("/ws/tasks/{task_id}")

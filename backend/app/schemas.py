@@ -29,3 +29,11 @@ class DlqRecordResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TaskStatsResponse(BaseModel):
+    total: int
+    pending: int
+    processing: int
+    completed: int
+    failed: int

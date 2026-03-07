@@ -28,7 +28,7 @@ const DEFAULT_OUTPUT = {
   architecture: `graph TD\n  UI[React Frontend] --> API[FastAPI Gateway]\n  API --> KAFKA[(Kafka Topics)]\n  KAFKA --> WORKER[Task Worker Pool]\n  WORKER --> DB[(PostgreSQL)]\n  WORKER --> OBJ[(S3 Storage)]\n  API --> MON[Prometheus + Grafana]`,
   stack: ["Frontend: React", "API: FastAPI", "Queue: Kafka", "Database: PostgreSQL", "Orchestration: Kubernetes"],
   database: `tasks(id, payload, status, result, created_at, updated_at)\ndlq_records(id, task_id, payload, attempt, error, created_at)`,
-  api: `POST   /tasks\nGET    /tasks/{id}\nGET    /dlq\nGET    /dlq/{task_id}\nWS     /ws/tasks/{id}`,
+  api: `POST   /tasks\nGET    /tasks/{id}\nGET    /stats\nGET    /dlq\nGET    /dlq/{task_id}\nWS     /ws/tasks/{id}`,
   deployment: "Submit a task to the API, process it asynchronously in workers, and watch status updates in real time.",
 };
 
@@ -88,7 +88,9 @@ export default function App() {
   const [currentTaskId, setCurrentTaskId] = useState(null);
   const [currentTaskStatus, setCurrentTaskStatus] = useState("IDLE");
   const [dlqRecords, setDlqRecords] = useState([]);
+  const [taskStats, setTaskStats] = useState(null);
   const [wsConnected, setWsConnected] = useState(false);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
 
   const wsRef = useRef(null);
   const pollTimerRef = useRef(null);
@@ -148,6 +150,21 @@ export default function App() {
     }
   };
 
+  const refreshStats = async () => {
+    setIsLoadingStats(true);
+    try {
+      const response = await fetch(`${apiBaseUrl}/stats`);
+      if (!response.ok) {
+        throw new Error(`Stats request failed (${response.status})`);
+      }
+      setTaskStats(await response.json());
+    } catch (error) {
+      pushToast(error.message || "Failed to load stats", "error");
+    } finally {
+      setIsLoadingStats(false);
+    }
+  };
+
   const handleTerminalTaskState = (task) => {
     if (task.status === "COMPLETED") {
       const resultText = task.result || "Task completed";
@@ -160,6 +177,7 @@ export default function App() {
       setVersions((prev) => [`v${prev.length + 1} - Task #${task.id} completed`, ...prev]);
       pushToast(`Task #${task.id} completed`, "success");
       stopRealtimeTracking();
+      refreshStats();
       return;
     }
 
@@ -173,6 +191,7 @@ export default function App() {
       pushToast(`Task #${task.id} failed`, "error");
       stopRealtimeTracking();
       refreshDlq();
+      refreshStats();
     }
   };
 
@@ -292,6 +311,7 @@ export default function App() {
 
   useEffect(() => {
     refreshDlq();
+    refreshStats();
   }, []);
 
   useEffect(() => {
@@ -453,6 +473,9 @@ export default function App() {
                 <button className="ghost-btn" onClick={refreshDlq} disabled={isLoadingDlq}>
                   {isLoadingDlq ? "Refreshing DLQ..." : "Refresh DLQ"}
                 </button>
+                <button className="ghost-btn" onClick={refreshStats} disabled={isLoadingStats}>
+                  {isLoadingStats ? "Refreshing Stats..." : "Refresh Stats"}
+                </button>
               </div>
 
               <p>
@@ -498,6 +521,21 @@ export default function App() {
                   <li key={version}>{version}</li>
                 ))}
               </ul>
+            </div>
+
+            <div className="panel-card">
+              <h3>Task Insights</h3>
+              {!taskStats ? (
+                <p>No stats yet.</p>
+              ) : (
+                <ul className="clean-list">
+                  <li>Total: {taskStats.total}</li>
+                  <li>Pending: {taskStats.pending}</li>
+                  <li>Processing: {taskStats.processing}</li>
+                  <li>Completed: {taskStats.completed}</li>
+                  <li>Failed: {taskStats.failed}</li>
+                </ul>
+              )}
             </div>
 
             <div className="panel-card">
