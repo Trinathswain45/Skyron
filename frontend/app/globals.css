@@ -1,0 +1,93 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(120deg, #f6f8fc 0%, #eef3ff 100%);
+  color: #1b2538;
+}
+
+.page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.card {
+  width: 100%;
+  max-width: 760px;
+  background: #ffffff;
+  border: 1px solid #dde5f4;
+  border-radius: 16px;
+  padding: 28px;
+  box-shadow: 0 8px 24px rgba(24, 41, 78, 0.08);
+}
+
+h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.subtitle {
+  margin: 8px 0 0;
+  color: #5f6d89;
+}
+
+.stats {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.stat {
+  border: 1px solid #e4ebf8;
+  border-radius: 12px;
+  padding: 14px;
+  background: #fafcff;
+}
+
+.stat-label {
+  margin: 0;
+  color: #6b7894;
+  font-size: 0.9rem;
+}
+
+.stat-value {
+  margin: 6px 0 0;
+  font-size: 1.2rem;
+  font-weight: 700;
+}
+
+.button {
+  margin-top: 20px;
+  border: 0;
+  background: #1b66ff;
+  color: #fff;
+  border-radius: 10px;
+  padding: 12px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button:hover {
+  background: #0f56e2;
+}
+
+@media (max-width: 700px) {
+  .card {
+    padding: 20px;
+  }
+
+  .stats {
+    grid-template-columns: 1fr;
+  }
+}
